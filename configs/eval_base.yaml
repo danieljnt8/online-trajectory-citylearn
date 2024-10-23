@@ -2,9 +2,9 @@ checkpoints_path: "pretrained/medium/halfcheetah"
 model_name: "model_last.pt"
 
 num_episodes: 25
-beam_context: 5
-beam_steps: 5
-beam_width: 32
+beam_context: 20
+beam_steps: 3
+beam_width: 16
 plan_every: 1
 sample_expand: 2
 k_act: null

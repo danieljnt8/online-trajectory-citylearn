@@ -30,11 +30,7 @@ from replay_buffer import ReplayBuffer,ReplayBufferTrajectory
 from lamb import Lamb
 #from stable_baselines3.common.vec_env import SubprocVecEnv
 from pathlib import Path
-from data import create_dataloader
-from decision_transformer.models.decision_transformer import DecisionTransformer
-#from evaluation import create_vec_eval_episodes_fn, vec_evaluate_episode_rtg
-from evaluation_citylearn import create_eval_episodes_fn,evaluate_episode_rtg
-from trainer import SequenceTrainerCustom, SequenceTrainerCustom
+
 from logger import Logger
 from wrappers_custom import *
 from utils_.helpers import *
@@ -44,20 +40,20 @@ from citylearn.citylearn import CityLearnEnv
 from citylearn.wrappers import *
 from utils_.variant_dict import variant
 from trajectory.datasets.discretized import DiscretizedDatasetTrajectory
-from eval_traj import aug_trajectory
+from eval_traj import aug_trajectory,eval_trajectory
 
 
 MAX_EPISODE_LEN = 8760
 
 
 class Experiment:
-    def __init__(self, variant,dataset_path,config_path = "configs/medium/city_learn_traj_testing.yaml"):
+    def __init__(self, variant,dataset_path,config_path = "configs/medium/city_learn_traj_v1_seq20_rf_CombinedReward_norm_wrapper.yaml"):
 
         config = OmegaConf.load(config_path)
         self.config = config
         self.eval_config = OmegaConf.load(variant["eval_config"])
 
-        self.device = variant.get("device", "cuda")
+        self.device = variant.get("device", "cuda:0")
 
         
 
@@ -76,13 +72,11 @@ class Experiment:
         
         offline_data_path = offline_data_path
         dataset = load_from_disk(offline_data_path)
-        self.replay_buffer = ReplayBufferTrajectory(8,dataset)
+        self.replay_buffer = ReplayBufferTrajectory(200,dataset)
 
         datasets = DiscretizedDatasetTrajectory(replay_buffer=self.replay_buffer,discount = config.dataset.discount, seq_len = config.dataset.seq_len, strategy = config.dataset.strategy)
-        if self.device == "cpu":
-            dataloader = DataLoader(datasets,  batch_size=1, shuffle=True)
-        else:
-            dataloader = DataLoader(datasets,  batch_size=config.dataset.batch_size, shuffle=True, num_workers=8, pin_memory=True)
+       
+        dataloader = DataLoader(datasets,  batch_size=config.dataset.batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
 
         trainer_conf = config.trainer
@@ -195,25 +189,29 @@ class Experiment:
 
 
         datasets = DiscretizedDatasetTrajectory(replay_buffer=self.replay_buffer,discount = self.config.dataset.discount, seq_len = self.config.dataset.seq_len, strategy = self.config.dataset.strategy)
-        if self.device == "cpu":
-            dataloader = DataLoader(datasets,  batch_size=1, shuffle=True)
-        else:
-            dataloader = DataLoader(datasets,  batch_size=self.config.dataset.batch_size, shuffle=True, num_workers=8, pin_memory=True)
+       
+        dataloader = DataLoader(datasets,  batch_size=self.config.dataset.batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
         self.discretizer = datasets.get_discretizer()
+        self.discretizer.to(self.device)
 
         self.trainer.train(
             model=self.model,
             dataloader=dataloader,
-            num_epochs = self.variant["max_pretrain_iters"]
+            num_epochs = self.variant["max_pretrain_epochs"]
         )
 
-        env_dataset,df_evaluate = aug_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= schema_eval,device = self.device)
+        #print("DEVICEE")
+        #print(self.device)
+        env_dataset_2,df_evaluate_2 = eval_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= schema_eval,device = self.device)
+        env_dataset_1,df_evaluate_1 = eval_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= "citylearn_challenge_2022_phase_1",device = self.device)
+
 
 
         torch.save(self.discretizer, self.logger.log_path+f"/discretizer_pretrain.pt")
         torch.save(self.model.state_dict(), self.logger.log_path+f"/model_pretrain.pt")
-        df_evaluate.to_csv(self.logger.log_path+f"/pretrained_eval.csv")
+        df_evaluate_2.to_csv(self.logger.log_path+f"/pretrained_eval_schema_2.csv")
+        df_evaluate_1.to_csv(self.logger.log_path+f"/pretrained_eval_schema_1.csv")
 
             
 
@@ -234,32 +232,40 @@ class Experiment:
         while self.online_iter < self.variant["max_online_iters"]:
 
             ## in every iteration add new_trajectory and train the model
-            env_dataset,df_evaluate = aug_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= online_schema,device = self.device)
-            self.replay_buffer.add_new_dataset(env_dataset)
+            aug_dataset,aug_df_evaluate = aug_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= online_schema,device = self.device,noise_std = 0.3)
+            self.replay_buffer.add_new_dataset(aug_dataset)
 
             
 
-            datasets = DiscretizedDatasetTrajectory(replay_buffer=self.replay_buffer,discount = self.config.dataset.discount, seq_len = self.config.dataset.seq_len, strategy = self.config.dataset.strategy)
+           
+            if self.online_iter % self.variant["eval_interval"] == 0:
+
+                datasets = DiscretizedDatasetTrajectory(replay_buffer=self.replay_buffer,discount = self.config.dataset.discount, seq_len = self.config.dataset.seq_len, strategy = self.config.dataset.strategy)
             
-            if self.device == "cpu":
-                dataloader = DataLoader(datasets,  batch_size=1, shuffle=True)
-            else:
+            
                 dataloader = DataLoader(datasets,  batch_size=self.config.dataset.batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
-            self.discretizer = datasets.get_discretizer() #update discretizer because new dataset
 
-            self.trainer.train(
-                model=self.model,
-                dataloader=dataloader,
-                num_epochs = 1
+                self.discretizer = datasets.get_discretizer() #update discretizer because new dataset
+                self.discretizer.to(self.device)
+                self.trainer.train(
+                    model=self.model,
+                    dataloader=dataloader,
+                    num_epochs = self.variant["num_epochs_per_online_iter"]
 
+                )
 
-            )
+                torch.save(self.discretizer, self.logger.log_path+f"/discretizer_online_iter_{self.online_iter}.pt")
+                torch.save(self.model.state_dict(), self.logger.log_path+f"/model_online_iter_{self.online_iter}.pt")
 
-            torch.save(self.discretizer, self.logger.log_path+f"/discretizer_online_iter_{self.online_iter}.pt")
-            torch.save(self.model.state_dict(), self.logger.log_path+f"/model_online_iter_{self.online_iter}.pt")
+            #if self.online_iter % self.variant["eval_interval"] == 0 : 
 
-            df_evaluate.to_csv(self.logger.log_path+f"/aug_iter_{self.online_iter}_eval.csv")
+                env_dataset,df_evaluate =  eval_trajectory(model = self.model,discretizer = self.discretizer,config = self.eval_config,schema= "citylearn_challenge_2022_phase_1",device = self.device)
+
+                #torch.save(self.discretizer, self.logger.log_path+f"/discretizer_online_iter_{self.online_iter}.pt")
+                #torch.save(self.model.state_dict(), self.logger.log_path+f"/model_online_iter_{self.online_iter}.pt")
+
+                df_evaluate.to_csv(self.logger.log_path+f"/aug_iter_{self.online_iter}_eval.csv")
 
 
             self.online_iter += 1
@@ -279,15 +285,15 @@ class Experiment:
         eval_env_schema = "citylearn_challenge_2022_phase_2"
 
         self.start_time = time.time()
-        if self.variant["max_pretrain_iters"]:
+        if self.variant["max_pretrain_epochs"]:
             self.pretrain(schema_eval=eval_env_schema)
 
         if self.variant["max_online_iters"]:
             print("\n\nMaking Online Env.....")
             
 
-            online_schema = "citylearn_challenge_2022_phase_1"
-            schema_eval = "citylearn_challenge_2022_phase_2"
+            online_schema = "citylearn_challenge_2022_phase_2"
+            schema_eval = "citylearn_challenge_2022_phase_1"
             #online_schema = "citylearn_challenge_2022_phase_1"
 
             self.online_tuning(online_schema,schema_eval)
@@ -305,19 +311,18 @@ if __name__ == "__main__":
 
   
     # pretraining options
-    parser.add_argument("--max_pretrain_iters", type=int, default=1)
-    parser.add_argument("--num_updates_per_pretrain_iter", type=int, default=1)
-
+    parser.add_argument("--max_pretrain_epochs", type=int, default=20)
+    
     # finetuning options
-    parser.add_argument("--max_online_iters", type=int, default=2)
-    parser.add_argument("--online_rtg", type=int, default=7200)
+    parser.add_argument("--max_online_iters", type=int, default=80)
     parser.add_argument("--num_online_rollouts", type=int, default=1)
     parser.add_argument("--replay_size", type=int, default=1000)
-    parser.add_argument("--num_updates_per_online_iter", type=int, default=1)
-    parser.add_argument("--eval_interval", type=int, default=10)
+    parser.add_argument("--num_epochs_per_online_iter", type=int, default=2)
+    parser.add_argument("--eval_interval", type=int, default=4)
+    #parser.add_argument("--tuning_interval", type=int, default=3)
 
     # environment options
-    parser.add_argument("--device", type=str, default="cpu") ##cuda 
+    parser.add_argument("--device", type=str, default="cuda") ##cuda 
     parser.add_argument("--log_to_tb", "-w", type=bool, default=True)
     parser.add_argument("--save_dir", type=str, default="./exp")
     parser.add_argument("--exp_name", type=str, default="default")
@@ -326,7 +331,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     utils.set_seed_everywhere(args.seed)
-    experiment = Experiment(vars(args),dataset_path="./data_interactions/sac_dataset.pkl")
+    experiment = Experiment(vars(args),dataset_path="data_interactions/RBCAgent1/model_RBCAgent1_timesteps_100000_rf_CombinedReward_seed_28_norm_wrapper.pkl")
 
     print("=" * 50)
     experiment()

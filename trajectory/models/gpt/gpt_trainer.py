@@ -170,6 +170,7 @@ class GPTTrainer:
                 loss = self.__get_loss(model, batch)
 
                 # step first, to prevent starting from high lr
+                print("Scheduler Batchsize "+str(batch[0].reshape(-1).shape[0]))
                 scheduler.step(batch_size=batch[0].reshape(-1).shape[0])
                 optimizer.zero_grad()
                 loss.backward()
@@ -177,7 +178,7 @@ class GPTTrainer:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip_grad)
                 optimizer.step()
 
-                update_loss_csv(iter_value = i , loss = loss.item(),filename=os.path.join(checkpoints_path,"batch_loss.csv"),type_name ="Batch")
+                #update_loss_csv(iter_value = i , loss = loss.item(),filename=os.path.join(checkpoints_path,"batch_loss.csv"),type_name ="Batch")
 
                 # log here!!
                 epoch_losses.append(loss.item())
@@ -186,7 +187,7 @@ class GPTTrainer:
                         "train/loss_batch": loss.item(),
                         "train/lr": scheduler.get_current_lr()
                     })
-                break
+               
             """
             NEED TO CHECK THIS FOR EVALUATION
             if epoch % self.eval_every == 0:
@@ -210,7 +211,7 @@ class GPTTrainer:
 
             loss_mean = np.mean(epoch_losses)
 
-            update_loss_csv(iter_value = epoch , loss = loss_mean,filename=os.path.join(checkpoints_path,"epoch_loss.csv"),type_name ="Epoch")
+            #update_loss_csv(iter_value = epoch , loss = loss_mean,filename=os.path.join(checkpoints_path,"epoch_loss.csv"),type_name ="Epoch")
             wandb.log({
                 "train/loss_mean": loss_mean,
                 "train/epoch": epoch

@@ -24,6 +24,208 @@ from tqdm.auto import trange
 from trajectory.planning.beam import beam_plan, batch_beam_plan
 
 
+def test_trajectory(model,discretizer, config, device,schema = "citylearn_challenge_2022_phase_3"):
+    #config is eval_config
+
+    env = CityLearnEnv(schema=schema,buildings=[0,2,4,5,6])
+    env.central_agent = True
+    env = NormalizedObservationWrapper(env)
+    env = StableBaselines3WrapperCustom(env)
+
+    beam_context_size = config.beam_context #config.beam_context 5
+    beam_width = config.beam_width #config.beam_width 32
+    beam_steps = config.beam_steps #config.beam_steps 5
+    plan_every = config.plan_every
+    sample_expand = config.sample_expand
+    k_act = config.k_act
+    k_obs = config.k_obs
+    k_reward = config.k_reward
+    temperature = config.temperature
+    discount = 0.99  #config.discount
+    max_steps = 8760 # change to 8760
+
+    value_placeholder = 1e6
+
+   
+
+    model.eval()
+    model.to(device)
+
+    transition_dim, obs_dim, act_dim = model.transition_dim, model.observation_dim, model.action_dim
+    # trajectory of tokens for model action planning
+    # +1 just to avoid index error while updating context on the last step
+    context = torch.zeros(1, model.transition_dim * (max_steps + 1), dtype=torch.long).to(device)
+
+    obs ,_= env.reset()
+    obs = np.array(obs)
+    total_reward = 0
+    obs_tokens = discretizer.encode(obs, subslice=(0, obs_dim)).squeeze()
+
+    context[:, :model.observation_dim] = torch.as_tensor(obs_tokens, device=device)  # initial tokens for planning
+
+    for step in (pbar := trange(max_steps, desc="Rollout steps", leave=False)):
+    #print(step)
+        if step % plan_every == 0:
+                # removing zeros from future, keep only context updated so far
+            context_offset = model.transition_dim * (step + 1) - model.action_dim - 2
+                # prediction: [a, s, a, s, ...]
+            prediction_tokens = beam_plan(
+                    model, discretizer, context[:, :context_offset],
+                    steps=beam_steps,
+                    beam_width=beam_width,
+                    context_size=beam_context_size,
+                    k_act=k_act, k_obs=k_obs, k_reward=k_reward,
+                    temperature=temperature,
+                    discount=discount,
+                    sample_expand=sample_expand
+                )
+        else:
+                # shift one transition forward in plan
+            prediction_tokens = prediction_tokens[transition_dim:]
+        action_tokens = prediction_tokens[:act_dim]
+        action = discretizer.decode(action_tokens.cpu().numpy(), subslice=(obs_dim, obs_dim + act_dim)).squeeze()
+     
+
+        obs, reward, done, _,_ = env.step(action)
+
+        obs = np.array(obs)
+        
+        total_reward +=reward
+        
+        pbar.set_postfix({'Reward': total_reward})
+        if done:
+            break
+            
+        obs_tokens = discretizer.encode(obs, subslice=(0, obs_dim)).squeeze()
+        reward_tokens = discretizer.encode(
+                np.array([reward, value_placeholder]),
+                subslice=(transition_dim - 2, transition_dim)
+            )
+        # updating context with new action and obs
+        context_offset = model.transition_dim * step
+            # [s, ...] -> [s, a, ...]
+        context[:, context_offset + obs_dim:context_offset + obs_dim + act_dim] = torch.as_tensor(action_tokens, device=device)
+            # [s, a, ...] -> [s, a, r, v, ...]
+        context[:, context_offset + transition_dim - 2:context_offset + transition_dim] = torch.as_tensor(reward_tokens, device=device)
+            # [s, a, r, v, ...] -> [s, a, r, v, s, ...]
+        context[:, context_offset + model.transition_dim:context_offset + model.transition_dim + model.observation_dim] = torch.as_tensor(obs_tokens, device=device)
+
+        
+    
+    #df_evaluate = env.env.evaluate()
+    data = env.dataset
+    dataset = Dataset.from_dict({k: [s[k] for s in data] for k in data[0].keys()})
+
+    df_evaluate = env.env.evaluate()
+    df_ts = env.env.df_ts_eval
+
+    #df_evaluate.to_csv(checkpoints_path + '/results.csv')
+    #df_ts.to_csv(checkpoints_path + '/results_TS.csv')
+    model.train()
+    
+    return dataset,df_evaluate,df_ts
+
+def eval_trajectory(model,discretizer, config, device,schema = "citylearn_challenge_2022_phase_2"):
+    #config is eval_config
+
+    env = CityLearnEnv(schema=schema)
+    env.central_agent = True
+    env = NormalizedObservationWrapper(env)
+    env = StableBaselines3WrapperCustom(env)
+
+    beam_context_size = config.beam_context #config.beam_context 5
+    beam_width = config.beam_width #config.beam_width 32
+    beam_steps = config.beam_steps #config.beam_steps 5
+    plan_every = config.plan_every
+    sample_expand = config.sample_expand
+    k_act = config.k_act
+    k_obs = config.k_obs
+    k_reward = config.k_reward
+    temperature = config.temperature
+    discount = 0.99  #config.discount
+    max_steps = 8760  # change to 8760
+
+    value_placeholder = 1e6
+
+   
+
+    model.eval()
+    model.to(device)
+
+    transition_dim, obs_dim, act_dim = model.transition_dim, model.observation_dim, model.action_dim
+    # trajectory of tokens for model action planning
+    # +1 just to avoid index error while updating context on the last step
+    context = torch.zeros(1, model.transition_dim * (max_steps + 1), dtype=torch.long).to(device)
+
+    obs ,_= env.reset()
+    obs = np.array(obs)
+    total_reward = 0
+    obs_tokens = discretizer.encode(obs, subslice=(0, obs_dim)).squeeze()
+
+    context[:, :model.observation_dim] = torch.as_tensor(obs_tokens, device=device)  # initial tokens for planning
+
+    for step in (pbar := trange(max_steps, desc="Rollout steps", leave=False)):
+    #print(step)
+        if step % plan_every == 0:
+                # removing zeros from future, keep only context updated so far
+            context_offset = model.transition_dim * (step + 1) - model.action_dim - 2
+                # prediction: [a, s, a, s, ...]
+            prediction_tokens = beam_plan(
+                    model, discretizer, context[:, :context_offset],
+                    steps=beam_steps,
+                    beam_width=beam_width,
+                    context_size=beam_context_size,
+                    k_act=k_act, k_obs=k_obs, k_reward=k_reward,
+                    temperature=temperature,
+                    discount=discount,
+                    sample_expand=sample_expand
+                )
+        else:
+                # shift one transition forward in plan
+            prediction_tokens = prediction_tokens[transition_dim:]
+        action_tokens = prediction_tokens[:act_dim]
+        action = discretizer.decode(action_tokens.cpu().numpy(), subslice=(obs_dim, obs_dim + act_dim)).squeeze()
+     
+
+        obs, reward, done, _,_ = env.step(action)
+
+        obs = np.array(obs)
+        
+        total_reward +=reward
+        
+        pbar.set_postfix({'Reward': total_reward})
+        if done:
+            break
+            
+        obs_tokens = discretizer.encode(obs, subslice=(0, obs_dim)).squeeze()
+        reward_tokens = discretizer.encode(
+                np.array([reward, value_placeholder]),
+                subslice=(transition_dim - 2, transition_dim)
+            )
+        # updating context with new action and obs
+        context_offset = model.transition_dim * step
+            # [s, ...] -> [s, a, ...]
+        context[:, context_offset + obs_dim:context_offset + obs_dim + act_dim] = torch.as_tensor(action_tokens, device=device)
+            # [s, a, ...] -> [s, a, r, v, ...]
+        context[:, context_offset + transition_dim - 2:context_offset + transition_dim] = torch.as_tensor(reward_tokens, device=device)
+            # [s, a, r, v, ...] -> [s, a, r, v, s, ...]
+        context[:, context_offset + model.transition_dim:context_offset + model.transition_dim + model.observation_dim] = torch.as_tensor(obs_tokens, device=device)
+
+        
+    
+    #df_evaluate = env.env.evaluate()
+    data = env.dataset
+    dataset = Dataset.from_dict({k: [s[k] for s in data] for k in data[0].keys()})
+
+    df_evaluate = env.env.evaluate()
+    df_ts = env.env.df_ts_eval
+    #df_evaluate.to_csv(checkpoints_path + '/results.csv')
+    model.train()
+    
+    return dataset,df_evaluate,df_ts
+    
+
+
 def aug_trajectory(model,discretizer, config, device,schema = "citylearn_challenge_2022_phase_2", noise_std=0.1):
     #config is eval_config
 
@@ -42,7 +244,7 @@ def aug_trajectory(model,discretizer, config, device,schema = "citylearn_challen
     k_reward = config.k_reward
     temperature = config.temperature
     discount = 0.99  #config.discount
-    max_steps = 5  # change to 8760
+    max_steps = 8760  # change to 8760
 
     value_placeholder = 1e6
 
@@ -122,6 +324,7 @@ def aug_trajectory(model,discretizer, config, device,schema = "citylearn_challen
 
     df_evaluate = env.env.evaluate()
     #df_evaluate.to_csv(checkpoints_path + '/results.csv')
+    model.train()
     
     return dataset,df_evaluate
     
@@ -143,7 +346,7 @@ def eval(checkpoints_path , config, run_config, device,schema = "citylearn_chall
     k_reward = config.k_reward
     temperature = config.temperature
     discount = 0.99  #config.discount
-    max_steps = 8759 
+    max_steps = 8760
 
     value_placeholder = 1e6
 
@@ -214,13 +417,13 @@ def eval(checkpoints_path , config, run_config, device,schema = "citylearn_chall
     
     df_evaluate = env.env.evaluate()
     df_evaluate.to_csv(checkpoints_path + '/results.csv')
-    
+    model.train()
 
 if __name__ == '__main__':
     
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoints_path =  ["checkpoints/city_learn/traj_config_v1_seq20_rf_CombinedReward_norm_wrapper/uniform/",
-    "model_RBCAgent1_timesteps_100000_rf_CombinedReward_seed_28_norm_wrapper/run_2"]
+    "model_RBCAgent1_timesteps_100000_rf_CombinedReward_seed_28_norm_wrapper/run_3"]
     checkpoints_path = "".join(checkpoints_path)
 
     run_config = "configs/medium/city_learn_traj_v1_seq20_rf_CombinedReward_norm_wrapper.yaml"

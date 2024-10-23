@@ -11,6 +11,8 @@ from trajectory.utils.common import round_to_multiple
 def beam_plan(model, discretizer, context, steps, beam_width, sample_expand, discount=0.99, context_size=None,
                     k_obs=1, k_reward=1, k_act=None, temperature=1.0):
     # as exact as possible to original implementation (not batched)
+    print("DEVICEE")
+    print(context.device)
     rewards = torch.zeros(beam_width, steps + 1, device=context.device)
     discounts = discount ** torch.arange(steps + 1, device=context.device)
 
@@ -40,6 +42,8 @@ def beam_plan(model, discretizer, context, steps, beam_width, sample_expand, dis
             model, plan, model_state=model_state, steps=2, top_k=k_reward, temperature=temperature
         )
         probs = F.softmax(logits, dim=-1)
+        probs = probs.to(context.device)
+
         reward_and_value = discretizer.expectation(probs, subslice=[model.transition_dim - 2, model.transition_dim])
 
         rewards[:, t:t + 2] = reward_and_value
